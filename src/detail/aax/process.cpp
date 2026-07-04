@@ -38,6 +38,11 @@ inline clap_sectime doubleToSecTime(double t)
   return std::round(t * CLAP_SECTIME_FACTOR);
 }
 
+inline double midiDataByteToNormalized(uint8_t value)
+{
+  return static_cast<double>(value) / 127.0;
+}
+
 AAXProcessAdapter::~AAXProcessAdapter()
 {
   delete[] _silent_input;
@@ -242,47 +247,56 @@ void AAXProcessAdapter::process(SAAX_Wrapper_AlgorithmicContext *context)
     const AAX_CMidiPacket *midiInPacketPtr = midiInputStream->mBuffer;
     auto numevents = midiInputStream->mBufferSize;
 
-    clap_multi_event_t n;  // re-using the event
-    n.note.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-
     while ((0 < numevents) && (NULL != midiInPacketPtr))
     {
-      // this is the same for all packets
-      n.note.header.flags = (midiInPacketPtr->mIsImmediate) ? CLAP_EVENT_IS_LIVE : 0;
-      n.note.header.time = midiInPacketPtr->mTimestamp;
-      n.note.header.size = sizeof(clap_event_note);
+      const auto eventFlags =
+          static_cast<uint32_t>((midiInPacketPtr->mIsImmediate) ? CLAP_EVENT_IS_LIVE : 0);
+      const auto eventTime = midiInPacketPtr->mTimestamp;
+      const auto midiLength = midiInPacketPtr->mLength;
+      const auto midiStatus = midiInPacketPtr->mData[0];
 
-      if (AAX::IsNoteOff(midiInPacketPtr) && !_midi_prefer_mididialect)
+      if (midiLength == 0)
       {
-        n.note.header.type = CLAP_EVENT_NOTE_OFF;
+        ++midiInPacketPtr;
+        --numevents;
+        continue;
+      }
+
+      if (midiLength >= 3 && AAX::IsNoteOff(midiInPacketPtr) && !_midi_prefer_mididialect)
+      {
+        clap_multi_event_t n{};
+        n.note.header = {sizeof(clap_event_note_t), eventTime, CLAP_CORE_EVENT_SPACE_ID,
+                         CLAP_EVENT_NOTE_OFF, eventFlags};
         n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
         n.note.note_id = -1;
         n.note.port_index = _midi_first_portid;
-        n.note.velocity = midiInPacketPtr->mData[2];
+        n.note.velocity = midiDataByteToNormalized(midiInPacketPtr->mData[2]);
         n.note.key = midiInPacketPtr->mData[1];
         _eventindices.push_back(_events.size());
         _events.emplace_back(n);
       }
-      else if (AAX::IsNoteOn(midiInPacketPtr) && !_midi_prefer_mididialect)
+      else if (midiLength >= 3 && AAX::IsNoteOn(midiInPacketPtr) && !_midi_prefer_mididialect)
       {
-        n.note.header.type = CLAP_EVENT_NOTE_ON;
+        clap_multi_event_t n{};
+        n.note.header = {sizeof(clap_event_note_t), eventTime, CLAP_CORE_EVENT_SPACE_ID,
+                         CLAP_EVENT_NOTE_ON, eventFlags};
         n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
         n.note.note_id = -1;
         n.note.port_index = _midi_first_portid;
-        n.note.velocity = midiInPacketPtr->mData[2];
+        n.note.velocity = midiDataByteToNormalized(midiInPacketPtr->mData[2]);
         n.note.key = midiInPacketPtr->mData[1];
         _eventindices.push_back(_events.size());
         _events.emplace_back(n);
       }
-      else if ((midiInPacketPtr->mData[0] & 0XF0) < 0xF0)
+      else if ((midiStatus & 0XF0) < 0xF0)
       {
-        n.midi.header.type = CLAP_EVENT_MIDI;
-        n.note.note_id = -1;
-        n.note.port_index = _midi_first_portid;
+        clap_multi_event_t n{};
+        n.midi.header = {sizeof(clap_event_midi_t), eventTime, CLAP_CORE_EVENT_SPACE_ID,
+                         CLAP_EVENT_MIDI, eventFlags};
+        n.midi.port_index = _midi_first_portid;
         n.midi.data[0] = midiInPacketPtr->mData[0];
-        n.midi.data[1] = midiInPacketPtr->mData[1];
-        n.midi.data[2] = midiInPacketPtr->mData[2];
-        // ignoring midiInPacketPtr->mData[4];
+        n.midi.data[1] = midiLength > 1 ? midiInPacketPtr->mData[1] : 0;
+        n.midi.data[2] = midiLength > 2 ? midiInPacketPtr->mData[2] : 0;
 
         _eventindices.push_back(_events.size());
         _events.emplace_back(n);

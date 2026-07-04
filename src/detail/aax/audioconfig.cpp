@@ -244,6 +244,8 @@ plugin_bus_info_t getAvailableBusConfigs(Clap::Library *factory, uint32_t index)
 
           uint32_t numins = ext_aud->count(tmpplug, true);
           uint32_t numout = ext_aud->count(tmpplug, false);
+          const bool hasInputs = numins > 0;
+          const bool hasOutputs = numout > 0;
           for (uint32_t i = 0; i < numins; ++i)
           {
             clap_audio_port_info_t info;
@@ -258,7 +260,7 @@ plugin_bus_info_t getAvailableBusConfigs(Clap::Library *factory, uint32_t index)
           for (uint32_t i = 0; i < numout; ++i)
           {
             clap_audio_port_info_t info;
-            if (ext_aud->get(tmpplug, i, true, &info))
+            if (ext_aud->get(tmpplug, i, false, &info))
             {
               // {false, 0, 1, CLAP_PORT_MONO, nullptr},
               requests.emplace_back(clap_audio_port_configuration_request{false, i, info.channel_count,
@@ -296,10 +298,12 @@ plugin_bus_info_t getAvailableBusConfigs(Clap::Library *factory, uint32_t index)
             // now check if the plugin accepts this
             if (ext_cap->can_apply_configuration(tmpplug, &requests[0], (uint32_t)requests.size()))
             {
-              std::string configname = fmt::format("{}/{}", i.aaxStemformat, i.aaxStemformat);
+              const auto formatIn = hasInputs ? i.aaxStemformat : static_cast<uint32_t>(AAX_eStemFormat_None);
+              const auto formatOut = hasOutputs ? i.aaxStemformat : static_cast<uint32_t>(AAX_eStemFormat_None);
+              std::string configname = fmt::format("{}/{}", formatIn, formatOut);
 
               // if yes, push it to the list of working configurations
-              result.stemformats.push_back({configname, i.aaxStemformat, i.aaxStemformat});
+              result.stemformats.push_back({configname, formatIn, formatOut});
             }
           }
         }
@@ -309,11 +313,12 @@ plugin_bus_info_t getAvailableBusConfigs(Clap::Library *factory, uint32_t index)
           clap_audio_port_info_t p;
           uint32_t numinputs = ext_aud->count(tmpplug, true);
           uint32_t numoutputs = ext_aud->count(tmpplug, false);
-          std::string f;
-          uint32_t informat = 0, outformat = 0;
+          std::string f = numinputs > 0 ? "" : "None/";
+          uint32_t informat = static_cast<uint32_t>(AAX_eStemFormat_None);
+          uint32_t outformat = static_cast<uint32_t>(AAX_eStemFormat_None);
           if (numinputs > 0)
           {
-            ext_aud->get(tmpplug, 0, false, &p);
+            ext_aud->get(tmpplug, 0, true, &p);
             switch (p.channel_count)
             {
               case 1:
@@ -327,6 +332,10 @@ plugin_bus_info_t getAvailableBusConfigs(Clap::Library *factory, uint32_t index)
               default:
                 break;
             }
+          }
+          else if (numoutputs == 0)
+          {
+            f.append("None");
           }
           if (numoutputs > 0)
           {
