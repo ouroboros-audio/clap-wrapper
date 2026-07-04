@@ -778,13 +778,7 @@ static Vst::SpeakerArrangement speakerArrFromPortType(const char *port_type, uin
 void ClapAsVst3::addAudioBusFrom(const clap_audio_port_info_t *info, bool is_input)
 {
   auto spk = speakerArrFromPortType(info->port_type, info->channel_count);
-
-  auto bustype = Vst::BusTypes::kMain;  // actually, everything is main, except
-  if (is_input && !(info->flags & CLAP_AUDIO_PORT_IS_MAIN))
-  {
-    // only inputs can be sidechains, everything that is not the MAIN bus is a sidechain
-    bustype = Vst::BusTypes::kAux;
-  }
+  auto bustype = (info->flags & CLAP_AUDIO_PORT_IS_MAIN) ? Vst::BusTypes::kMain : Vst::BusTypes::kAux;
 
   // bool supports64bit = (info->flags & CLAP_AUDIO_PORT_SUPPORTS_64BITS);
   Steinberg::char16 name16[256];
@@ -1806,14 +1800,7 @@ tresult ClapAsVst3::getBusInfo(Vst::MediaType type, Vst::BusDirection dir, int32
         bus.direction = dir;
         bus.flags = Vst::BusInfo::kDefaultActive;
 
-        if (dir == Vst::BusDirections::kOutput)
-        {
-          bus.busType = Vst::kMain;  // outputs are always main
-        }
-        else
-        {
-          bus.busType = (info.flags & CLAP_AUDIO_PORT_IS_MAIN) ? Vst::kMain : Vst::kAux;
-        }
+        bus.busType = (info.flags & CLAP_AUDIO_PORT_IS_MAIN) ? Vst::kMain : Vst::kAux;
 
         utf8_to_utf16l(info.name, (uint16_t *)&bus.name[0], str16BufferSize(Steinberg::Vst::String128));
 
