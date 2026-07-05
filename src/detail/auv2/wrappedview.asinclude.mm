@@ -13,6 +13,8 @@
 #import <AudioUnit/AUCocoaUIView.h>
 #import <AppKit/AppKit.h>
 
+#include <cstring>
+
 #include "auv2_shared.h"
 #include <detail/os/osutil.h>
 
@@ -97,6 +99,12 @@ void CLAP_WRAPPER_TIMER_CALLBACK(CFRunLoopTimerRef timer, void *info)
   }
   ui._createWindow();
   auto gui = ui._plugin->_ext._gui;
+  if (gui == nullptr)
+  {
+    ui._destroyWindow();
+    [self release];
+    return nil;
+  }
 
   // actually, the host should send an appropriate size,
   // yet, they actually just send utter garbage, so: don't care
@@ -104,12 +112,17 @@ void CLAP_WRAPPER_TIMER_CALLBACK(CFRunLoopTimerRef timer, void *info)
   {
     // gui->get_size(ui._plugin->_plugin,)
     uint32_t w, h;
-    if (gui->get_size(ui._plugin->_plugin, &w, &h))
+    if (gui->get_size != nullptr && gui->get_size(ui._plugin->_plugin, &w, &h))
     {
       size = {(double)w, (double)h};
     }
   }
   self = [super initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+  if (self == nil)
+  {
+    ui._destroyWindow();
+    return nil;
+  }
 
   // gui->show(ui._plugin->_plugin);
 
@@ -117,21 +130,31 @@ void CLAP_WRAPPER_TIMER_CALLBACK(CFRunLoopTimerRef timer, void *info)
   m.api = CLAP_WINDOW_API_COCOA;
   m.ptr = self;
 
-  gui->set_parent(ui._plugin->_plugin, &m);
+  if (gui->set_parent == nullptr || !gui->set_parent(ui._plugin->_plugin, &m))
+  {
+    ui._destroyWindow();
+    [self release];
+    return nil;
+  }
   // gui->set_scale is intentionally not called because
   // AUv2 gui always uses logical size
 
-  if (gui->can_resize(ui._plugin->_plugin))
+  if (gui->can_resize != nullptr && gui->can_resize(ui._plugin->_plugin))
   {
     clap_gui_resize_hints_t resize_hints;
-    gui->get_resize_hints(ui._plugin->_plugin, &resize_hints);
+    std::memset(&resize_hints, 0, sizeof(resize_hints));
+    if (gui->get_resize_hints != nullptr)
+    {
+      gui->get_resize_hints(ui._plugin->_plugin, &resize_hints);
+    }
     NSAutoresizingMaskOptions mask = 0;
 
     if (resize_hints.can_resize_horizontally) mask |= NSViewWidthSizable;
     if (resize_hints.can_resize_vertically) mask |= NSViewHeightSizable;
 
     [self setAutoresizingMask:mask];
-    gui->set_size(ui._plugin->_plugin, size.width, size.height);
+    if (gui->set_size != nullptr)
+      gui->set_size(ui._plugin->_plugin, size.width, size.height);
   }
 
   idleTimer = nil;
@@ -191,7 +214,8 @@ void CLAP_WRAPPER_TIMER_CALLBACK(CFRunLoopTimerRef timer, void *info)
     auto gui = ui._plugin->_ext._gui;
     // gui->set_scale is intentionally not called because
     // AUv2 gui always uses logical size
-    gui->set_size(ui._plugin->_plugin, newSize.size.width, newSize.size.height);
+    if (gui != nullptr && gui->set_size != nullptr)
+      gui->set_size(ui._plugin->_plugin, newSize.size.width, newSize.size.height);
   }
   // gui->show(ui._plugin->_plugin);
 }
