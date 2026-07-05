@@ -18,6 +18,7 @@
 #include <CoreMIDI/CoreMIDI.h>
 #include "auv2_shared.h"
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <map>
 
@@ -142,9 +143,13 @@ class MIDIOutput
   {
     return _midiPacketList;
   }
-  bool addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
-  bool addNoteOff(uint8_t channel, uint8_t note, uint8_t velocity);
-  bool addMIDI3Byte(const uint8_t *threebytes);
+  MIDIEventList *getMIDIEventList()
+  {
+    return _midiEventList;
+  }
+  bool addNoteOn(uint32_t timestamp, uint8_t channel, uint8_t note, uint8_t velocity);
+  bool addNoteOff(uint32_t timestamp, uint8_t channel, uint8_t note, uint8_t velocity);
+  bool addMIDI3Byte(uint32_t timestamp, const uint8_t *threebytes);
 
   void clear();
   const clap_note_port_info _info;
@@ -155,43 +160,73 @@ class MIDIOutput
   }
 
  private:
+  bool addMIDIBytes(uint32_t timestamp, const uint8_t *bytes, uint32_t length);
+
   MIDIPacket *_current = nullptr;
   MIDIPacketList *_midiPacketList = nullptr;
+  MIDIEventPacket *_currentEventPacket = nullptr;
+  MIDIEventList *_midiEventList = nullptr;
   uint8_t _buffer[2048];
+  uint8_t _eventListBuffer[2048];
   uint32_t _numEvents = 0;
 };
 
 MIDIOutput::MIDIOutput(int auport, const clap_note_port_info &info) : _info(info), _auport(auport)
 {
   _midiPacketList = (MIDIPacketList *)_buffer;
+  _midiEventList = (MIDIEventList *)_eventListBuffer;
   _current = MIDIPacketListInit(_midiPacketList);
+  _currentEventPacket = MIDIEventListInit(_midiEventList, kMIDIProtocol_1_0);
   _numEvents = 0;
 }
 
 void MIDIOutput::clear()
 {
   _current = MIDIPacketListInit(_midiPacketList);
+  _currentEventPacket = MIDIEventListInit(_midiEventList, kMIDIProtocol_1_0);
   _numEvents = 0;
 }
 
-bool MIDIOutput::addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity)
+bool MIDIOutput::addMIDIBytes(uint32_t timestamp, const uint8_t *bytes, uint32_t length)
+{
+  if (length < 1 || length > 3)
+  {
+    return false;
+  }
+
+  uint8_t padded[3] = {bytes[0], length > 1 ? bytes[1] : uint8_t{0}, length > 2 ? bytes[2] : uint8_t{0}};
+  _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, timestamp, length, padded);
+
+  const UInt32 word = (static_cast<UInt32>(0x2u) << 28) |
+                      (static_cast<UInt32>(padded[0]) << 16) |
+                      (static_cast<UInt32>(padded[1]) << 8) |
+                      static_cast<UInt32>(padded[2]);
+  _currentEventPacket = MIDIEventListAdd(_midiEventList, sizeof(_eventListBuffer), _currentEventPacket,
+                                         timestamp, 1, &word);
+
+  if (_current == nullptr || _currentEventPacket == nullptr)
+  {
+    return false;
+  }
+
+  ++_numEvents;
+  return true;
+}
+
+bool MIDIOutput::addNoteOn(uint32_t timestamp, uint8_t channel, uint8_t note, uint8_t velocity)
 {
   uint8_t ev[3] = {static_cast<uint8_t>((uint8_t)0x90u | (channel & 0xF)),
                    static_cast<uint8_t>((note & 0x7F)), static_cast<uint8_t>((velocity & 0x7F))};
-  _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, (Byte *)ev);
-  ++_numEvents;
-  return (_current != nullptr);
+  return addMIDIBytes(timestamp, ev, 3);
 }
-bool MIDIOutput::addNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
+bool MIDIOutput::addNoteOff(uint32_t timestamp, uint8_t channel, uint8_t note, uint8_t velocity)
 {
   uint8_t ev[3] = {static_cast<uint8_t>((uint8_t)0x80u | (channel & 0xF)),
                    static_cast<uint8_t>((note & 0x7F)), static_cast<uint8_t>((velocity & 0x7F))};
-  _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, (Byte *)ev);
-  ++_numEvents;
-  return (_current != nullptr);
+  return addMIDIBytes(timestamp, ev, 3);
 }
 
-bool MIDIOutput::addMIDI3Byte(const uint8_t *threebytes)
+bool MIDIOutput::addMIDI3Byte(uint32_t timestamp, const uint8_t *threebytes)
 {
   auto cmd = (threebytes[0] >> 4) & 0xFu;
   switch (cmd)
@@ -201,18 +236,13 @@ bool MIDIOutput::addMIDI3Byte(const uint8_t *threebytes)
     case 0x0A:
     case 0x0B:
     case 0x0E:
-      _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 3, threebytes);
-      break;
+      return addMIDIBytes(timestamp, threebytes, 3);
     case 0x0C:
     case 0x0D:
-      _current = MIDIPacketListAdd(_midiPacketList, sizeof(_buffer), _current, 0, 2, threebytes);
-      break;
+      return addMIDIBytes(timestamp, threebytes, 2);
     default:
       return false;
   }
-
-  ++_numEvents;
-  return (_current != nullptr);
 }
 
 class WrapAsAUV2 : public ausdk::AUBase,
@@ -294,16 +324,108 @@ class WrapAsAUV2 : public ausdk::AUBase,
   OSStatus MIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData2,
                      UInt32 inOffsetSampleFrame) override
   {
-    const UInt32 strippedStatus = inStatus & 0xf0U;  // NOLINT
-    const UInt32 channel = inStatus & 0x0fU;         // NOLINT
-
     if (_processAdapter)
     {
       _processAdapter->addMIDIEvent(inStatus, inData1, inData2, inOffsetSampleFrame);
     }
-    (void)strippedStatus;
-    (void)channel;
-    return noErr;  //  HandleMIDIEvent(strippedStatus, channel, inData1, inData2, inOffsetSampleFrame);
+    return noErr;
+  }
+
+  OSStatus MIDIEventList(UInt32 inOffsetSampleFrame, const struct MIDIEventList *eventList) override
+  {
+    if (_processAdapter == nullptr || eventList == nullptr)
+    {
+      return noErr;
+    }
+
+    const auto scale16To7 = [](UInt32 value) -> UInt32
+    {
+      return static_cast<UInt32>((static_cast<uint64_t>(value & 0xFFFFU) * 127U + 32767U) / 65535U);
+    };
+    const auto scale32To7 = [](UInt32 value) -> UInt32
+    {
+      return static_cast<UInt32>((static_cast<uint64_t>(value) * 127U + 2147483647U) / 4294967295ULL);
+    };
+    const auto scale32To14 = [](UInt32 value) -> UInt32
+    {
+      return static_cast<UInt32>((static_cast<uint64_t>(value) * 16383U + 2147483647U) / 4294967295ULL);
+    };
+
+    const MIDIEventPacket *packet = &eventList->packet[0];
+    for (UInt32 packetIndex = 0; packetIndex < eventList->numPackets; ++packetIndex)
+    {
+      const auto combinedOffset = static_cast<uint64_t>(inOffsetSampleFrame) + packet->timeStamp;
+      const auto packetOffset = combinedOffset > std::numeric_limits<UInt32>::max()
+                                    ? std::numeric_limits<UInt32>::max()
+                                    : static_cast<UInt32>(combinedOffset);
+
+      for (UInt32 wordIndex = 0; wordIndex < packet->wordCount; ++wordIndex)
+      {
+        const UInt32 word = packet->words[wordIndex];
+        const auto messageType = static_cast<MIDIMessageType>((word >> 28U) & 0x0FU);
+
+        if (messageType == kMIDIMessageTypeChannelVoice1)
+        {
+          const auto status = static_cast<UInt32>((word >> 16U) & 0xFFU);
+          const auto data1 = static_cast<UInt32>((word >> 8U) & 0x7FU);
+          const auto data2 = static_cast<UInt32>(word & 0x7FU);
+          _processAdapter->addMIDIEvent(status, data1, data2, packetOffset);
+          continue;
+        }
+
+        if (messageType != kMIDIMessageTypeChannelVoice2 || wordIndex + 1 >= packet->wordCount)
+        {
+          continue;
+        }
+
+        const UInt32 value = packet->words[++wordIndex];
+        const auto statusNibble = static_cast<UInt32>((word >> 20U) & 0x0FU);
+        const auto channel = static_cast<UInt32>((word >> 16U) & 0x0FU);
+        const auto status = static_cast<UInt32>((statusNibble << 4U) | channel);
+        UInt32 data1 = 0;
+        UInt32 data2 = 0;
+
+        switch (statusNibble)
+        {
+          case kMIDICVStatusNoteOff:
+          case kMIDICVStatusNoteOn:
+            data1 = static_cast<UInt32>((word >> 8U) & 0x7FU);
+            data2 = scale16To7((value >> 16U) & 0xFFFFU);
+            break;
+          case kMIDICVStatusPolyPressure:
+            data1 = static_cast<UInt32>((word >> 8U) & 0x7FU);
+            data2 = scale32To7(value);
+            break;
+          case kMIDICVStatusControlChange:
+            data1 = static_cast<UInt32>((word >> 8U) & 0x7FU);
+            data2 = scale32To7(value);
+            break;
+          case kMIDICVStatusProgramChange:
+            data1 = static_cast<UInt32>((value >> 24U) & 0x7FU);
+            data2 = 0;
+            break;
+          case kMIDICVStatusChannelPressure:
+            data1 = scale32To7(value);
+            data2 = 0;
+            break;
+          case kMIDICVStatusPitchBend:
+          {
+            const auto bend = scale32To14(value);
+            data1 = bend & 0x7FU;
+            data2 = (bend >> 7U) & 0x7FU;
+            break;
+          }
+          default:
+            continue;
+        }
+
+        _processAdapter->addMIDIEvent(status, data1, data2, packetOffset);
+      }
+
+      packet = MIDIEventPacketNext(packet);
+    }
+
+    return noErr;
   }
 
   OSStatus SysEx(const UInt8 *inData, UInt32 inLength) override
@@ -558,6 +680,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   // ------------- for the MIDI output
   AUMIDIOutputCallbackStruct _midioutput_hostcallback = {nullptr, nullptr};
+  AUMIDIEventListBlock _midioutput_eventlist_hostcallback = nullptr;
+  SInt32 _host_midi_protocol = kMIDIProtocol_1_0;
 
   std::atomic_bool _requestUICallback = false;
 

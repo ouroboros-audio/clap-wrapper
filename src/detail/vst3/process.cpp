@@ -14,6 +14,21 @@ namespace Clap
 {
 using namespace Steinberg;
 
+inline int16 clampVstMidiChannel(int32_t channel)
+{
+  return static_cast<int16>(std::clamp(channel, int32_t{0}, int32_t{15}));
+}
+
+inline int16 clampVstMidiDataByte(int32_t value)
+{
+  return static_cast<int16>(std::clamp(value, int32_t{0}, int32_t{127}));
+}
+
+inline float midiDataByteToFloat(int32_t value)
+{
+  return static_cast<float>(clampVstMidiDataByte(value)) / 127.0f;
+}
+
 ProcessAdapter::~ProcessAdapter()
 {
 }
@@ -807,6 +822,77 @@ bool ProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
       break;
 
     case CLAP_EVENT_MIDI:
+    {
+      auto mevt = reinterpret_cast<const clap_event_midi *>(event);
+      const auto status = static_cast<uint8_t>(mevt->data[0]);
+      const auto kind = static_cast<uint8_t>(status & 0xF0u);
+      const auto channel = clampVstMidiChannel(status & 0x0Fu);
+
+      Steinberg::Vst::Event oe{};
+      oe.busIndex = 0;
+      oe.sampleOffset = mevt->header.time;
+
+      switch (kind)
+      {
+        case 0x80:
+          oe.type = Steinberg::Vst::Event::kNoteOffEvent;
+          oe.noteOff.channel = channel;
+          oe.noteOff.pitch = clampVstMidiDataByte(mevt->data[1]);
+          oe.noteOff.velocity = midiDataByteToFloat(mevt->data[2]);
+          oe.noteOff.tuning = 0.0f;
+          oe.noteOff.noteId = -1;
+          break;
+        case 0x90:
+          oe.type = Steinberg::Vst::Event::kNoteOnEvent;
+          oe.noteOn.channel = channel;
+          oe.noteOn.pitch = clampVstMidiDataByte(mevt->data[1]);
+          oe.noteOn.velocity = midiDataByteToFloat(mevt->data[2]);
+          oe.noteOn.length = 0;
+          oe.noteOn.tuning = 0.0f;
+          oe.noteOn.noteId = -1;
+          break;
+        case 0xA0:
+          oe.type = Steinberg::Vst::Event::kPolyPressureEvent;
+          oe.polyPressure.channel = channel;
+          oe.polyPressure.pitch = clampVstMidiDataByte(mevt->data[1]);
+          oe.polyPressure.pressure = midiDataByteToFloat(mevt->data[2]);
+          oe.polyPressure.noteId = -1;
+          break;
+        case 0xB0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.channel = static_cast<int8>(channel);
+          oe.midiCCOut.controlNumber = static_cast<uint8>(clampVstMidiDataByte(mevt->data[1]));
+          oe.midiCCOut.value = static_cast<int8>(clampVstMidiDataByte(mevt->data[2]));
+          oe.midiCCOut.value2 = 0;
+          break;
+        case 0xC0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.channel = static_cast<int8>(channel);
+          oe.midiCCOut.controlNumber = Steinberg::Vst::kCtrlProgramChange;
+          oe.midiCCOut.value = static_cast<int8>(clampVstMidiDataByte(mevt->data[1]));
+          oe.midiCCOut.value2 = 0;
+          break;
+        case 0xD0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.channel = static_cast<int8>(channel);
+          oe.midiCCOut.controlNumber = Steinberg::Vst::kAfterTouch;
+          oe.midiCCOut.value = static_cast<int8>(clampVstMidiDataByte(mevt->data[1]));
+          oe.midiCCOut.value2 = 0;
+          break;
+        case 0xE0:
+          oe.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+          oe.midiCCOut.channel = static_cast<int8>(channel);
+          oe.midiCCOut.controlNumber = Steinberg::Vst::kPitchBend;
+          oe.midiCCOut.value = static_cast<int8>(clampVstMidiDataByte(mevt->data[1]));
+          oe.midiCCOut.value2 = static_cast<int8>(clampVstMidiDataByte(mevt->data[2]));
+          break;
+        default:
+          return false;
+      }
+
+      if (_vstdata && _vstdata->outputEvents) _vstdata->outputEvents->addEvent(oe);
+      return true;
+    }
     case CLAP_EVENT_MIDI_SYSEX:
     case CLAP_EVENT_MIDI2:
       return true;

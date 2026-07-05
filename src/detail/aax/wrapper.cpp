@@ -161,6 +161,7 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   // Register MIDI nodes. To avoid context corruption, register small blocks of private data for fields where a node is not needed
   AAX_CFieldIndex globalNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mGlobalNode);
   AAX_CFieldIndex localInputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mInputNode);
+  AAX_CFieldIndex localOutputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mOutputNode);
   AAX_CFieldIndex transportNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mTransportNode);
 
   // Global MIDI node — not currently used
@@ -186,11 +187,16 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   if (businfo.has_midi_out)
   {
     if (aax_plugin_info && aax_plugin_info->midi_out_name)
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  aax_plugin_info->midi_out_name, aax_plugin_info->midi_out_channel_mask);
     else
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  businfo.midi_out_name.c_str(), 0xFFFF);
+  }
+  else
+  {
+    err = outDesc->AddPrivateData(localOutputNodeID, sizeof(float),
+                                  AAX_ePrivateDataOptions_DefaultOptions);
   }
 
   if (true)  // setupInfo.mNeedsTransport)
@@ -925,7 +931,31 @@ AAX_Result ClapAsAAX::NotificationReceived(AAX_CTypeID inNotificationType,
 
 void ClapAsAAX::setupWrapperSpecifics(const clap_plugin_t *plugin)
 {
-  // nothing for AAX yet
+  _aax_info_controls_midi_nodes = false;
+  _aax_info_has_midi_output_node = false;
+
+  if (!_library || !_library->_pluginFactoryAAXInfo || plugin == nullptr || plugin->desc == nullptr)
+  {
+    return;
+  }
+
+  for (size_t i = 0; i < _library->plugins.size(); ++i)
+  {
+    const auto *descriptor = _library->plugins[i];
+    if (descriptor == nullptr || descriptor->id == nullptr || plugin->desc->id == nullptr ||
+        std::string(descriptor->id) != plugin->desc->id)
+    {
+      continue;
+    }
+
+    const auto *aaxInfo = _library->get_aax_info(static_cast<uint32_t>(i));
+    if (aaxInfo)
+    {
+      _aax_info_controls_midi_nodes = true;
+      _aax_info_has_midi_output_node = aaxInfo->midi_out_name != nullptr;
+    }
+    return;
+  }
 }
 
 void ClapAsAAX::setupAudioBusses(const clap_plugin_t *plugin,
@@ -937,6 +967,8 @@ void ClapAsAAX::setupAudioBusses(const clap_plugin_t *plugin,
 
 void ClapAsAAX::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_note_ports_t *noteports)
 {
+  _has_midi_output_node = false;
+
   if (noteports->count(plugin, true) > 0)
   {
     clap_note_port_info_t info;
@@ -944,6 +976,24 @@ void ClapAsAAX::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_n
     {
       this->_midi_first_portid = info.id;
       this->_midi_prefer_mididialect = (info.preferred_dialect & CLAP_NOTE_DIALECT_MIDI);
+    }
+  }
+
+  if (_aax_info_controls_midi_nodes)
+  {
+    _has_midi_output_node = _aax_info_has_midi_output_node;
+    return;
+  }
+
+  const auto outputCount = noteports->count(plugin, false);
+  for (uint32_t i = 0; i < outputCount; ++i)
+  {
+    clap_note_port_info_t info;
+    if (noteports->get(plugin, i, false, &info) &&
+        (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI))
+    {
+      _has_midi_output_node = true;
+      return;
     }
   }
 }
@@ -1219,7 +1269,8 @@ void ClapAsAAX::activatePlugin()
     _processAdapter = std::make_unique<AAXProcessAdapter>();
     _processAdapter->setupProcessing(_plugin->_plugin, _plugin->getSampleRate(), _plugin->_ext._params,
                                      _plugin->_ext._audioports, this, _gesturedparameters,
-                                     _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect);
+                                     _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect,
+                                     _has_midi_output_node);
 
     _activated = true;
     _plugin->activate();

@@ -1,5 +1,6 @@
 #include "generated_entrypoints.hxx"
 #include "detail/auv2/process.h"
+#include <Block.h>
 #include <set>
 #include <limits>
 #include <cassert>
@@ -155,6 +156,12 @@ WrapAsAUV2::WrapAsAUV2(AUV2_Type type, const std::string &clapname, const std::s
 
 WrapAsAUV2::~WrapAsAUV2()
 {
+  if (_midioutput_eventlist_hostcallback != nullptr)
+  {
+    Block_release(_midioutput_eventlist_hostcallback);
+    _midioutput_eventlist_hostcallback = nullptr;
+  }
+
   if (_plugin)
   {
     if (_uiIsOpened && _uiconn._canary)
@@ -326,7 +333,9 @@ void WrapAsAUV2::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_
     clap_note_port_info_t info;
     if (noteports->get(plugin, 0, true, &info))
     {
-      _midi_preferred_dialect = info.preferred_dialect;
+      _midi_preferred_dialect = (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI)
+                                    ? CLAP_NOTE_DIALECT_MIDI
+                                    : info.preferred_dialect;
       _midi_understands_midi2 = (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI2);
     }
   }
@@ -459,7 +468,10 @@ void WrapAsAUV2::param_rescan(clap_param_rescan_flags flags)
   // if ( flags & CLAP_PARAM_RESCAN_ALL) // TODO: check out how differentiated we can do this
   {
     PropertyChanged(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
-    PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, 0);
+    for (const auto paramId : _orderedParameterList)
+    {
+      PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, paramId);
+    }
     PropertyChanged(kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0);
     return;
   }
@@ -687,14 +699,28 @@ OSStatus WrapAsAUV2::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope in
         break;
 
       case kAudioUnitProperty_MIDIOutputCallbackInfo:
+        if (_midi_outports.empty()) return kAudioUnitErr_InvalidProperty;
         outDataSize = sizeof(CFArrayRef);
         outWritable = false;
         return noErr;
-        break;
       case kAudioUnitProperty_MIDIOutputCallback:
+        if (_midi_outports.empty()) return kAudioUnitErr_InvalidProperty;
         outWritable = true;
         outDataSize = sizeof(AUMIDIOutputCallbackStruct);
-        break;
+        return noErr;
+      case kAudioUnitProperty_MIDIOutputEventListCallback:
+        if (_midi_outports.empty()) return kAudioUnitErr_InvalidProperty;
+        outWritable = true;
+        outDataSize = sizeof(AUMIDIEventListBlock);
+        return noErr;
+      case kAudioUnitProperty_HostMIDIProtocol:
+        outWritable = true;
+        outDataSize = sizeof(SInt32);
+        return noErr;
+      case kAudioUnitProperty_AudioUnitMIDIProtocol:
+        outWritable = false;
+        outDataSize = sizeof(SInt32);
+        return noErr;
 
         // custom
       case kAudioUnitProperty_ClapWrapper_UIConnection_id:
@@ -829,7 +855,12 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
         // TODO: change this when figured out how the NoteParamsControlValue actually do work.
         *static_cast<UInt32 *>(outData) = 1;
         return noErr;
-        break;
+      case kAudioUnitProperty_HostMIDIProtocol:
+        *static_cast<SInt32 *>(outData) = _host_midi_protocol;
+        return noErr;
+      case kAudioUnitProperty_AudioUnitMIDIProtocol:
+        *static_cast<SInt32 *>(outData) = kMIDIProtocol_1_0;
+        return noErr;
       default:
         break;
     }
@@ -869,9 +900,24 @@ OSStatus WrapAsAUV2::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
       case kAudioUnitProperty_MIDIOutputCallbackInfo:
         // this is actually read only
         return noErr;
-        break;
       case kAudioUnitProperty_MIDIOutputEventListCallback:
-        break;
+        if (_midi_outports.empty()) return kAudioUnitErr_InvalidProperty;
+        if (inDataSize != sizeof(AUMIDIEventListBlock)) return kAudioUnitErr_InvalidPropertyValue;
+        if (_midioutput_eventlist_hostcallback != nullptr)
+        {
+          Block_release(_midioutput_eventlist_hostcallback);
+          _midioutput_eventlist_hostcallback = nullptr;
+        }
+        if (inData)
+        {
+          const auto callback = *static_cast<const AUMIDIEventListBlock *>(inData);
+          if (callback)
+          {
+            _midioutput_eventlist_hostcallback =
+                reinterpret_cast<AUMIDIEventListBlock>(Block_copy(callback));
+          }
+        }
+        return noErr;
       case kAudioUnitProperty_MIDIOutputCallback:
         if (inDataSize < sizeof(AUMIDIOutputCallbackStruct)) return kAudioUnitErr_InvalidPropertyValue;
 
@@ -885,7 +931,10 @@ OSStatus WrapAsAUV2::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
           _midioutput_hostcallback.userData = nullptr;
         }
         return noErr;
-        break;
+      case kAudioUnitProperty_HostMIDIProtocol:
+        if (inDataSize != sizeof(SInt32)) return kAudioUnitErr_InvalidPropertyValue;
+        _host_midi_protocol = *static_cast<const SInt32 *>(inData);
+        return noErr;
 
 #ifdef DUAL_SCHEDULING_ENABLED
 
@@ -1010,7 +1059,9 @@ void WrapAsAUV2::deactivateCLAP()
     _plugin->stop_processing();
     _plugin->deactivate();
   }
-  _midioutput_hostcallback = {nullptr, nullptr};
+  // MIDI output callbacks are host configuration, not CLAP activation state.
+  // Keep them installed across AU cleanup/reactivation; SetProperty(nullptr)
+  // and the destructor are responsible for explicit release.
 }
 
 OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTimeStamp &inTimeStamp,
@@ -1061,7 +1112,15 @@ OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTime
       {
         if (i->hasEvents())
         {
-          if (_midioutput_hostcallback.midiOutputCallback)
+          if (_midioutput_eventlist_hostcallback != nullptr)
+          {
+            auto eventList = i->getMIDIEventList();
+            [[maybe_unused]] OSStatus result =
+                _midioutput_eventlist_hostcallback(static_cast<AUEventSampleTime>(inTimeStamp.mSampleTime),
+                                                   static_cast<uint8_t>(i->_auport), eventList);
+            assert(result == noErr);
+          }
+          else if (_midioutput_hostcallback.midiOutputCallback)
           {
             auto userd = _midioutput_hostcallback.userData;
             auto pktlist = i->getMIDIPacketList();
@@ -1507,46 +1566,43 @@ UInt32 WrapAsAUV2::GetAudioChannelLayout(AudioUnitScope scope, AudioUnitElement 
 
 void WrapAsAUV2::send(const Clap::AUv2::clap_multi_event_t &event)
 {
-  // port index maps back to MIDI out
+  const auto midiOutForPortIndex = [this](std::int64_t portIndex) -> MIDIOutput *
+  {
+    if (portIndex < 0)
+    {
+      return _midi_outports.empty() ? nullptr : _midi_outports.front().get();
+    }
+
+    const auto index = static_cast<std::size_t>(portIndex);
+    return index < _midi_outports.size() ? _midi_outports[index].get() : nullptr;
+  };
+
   auto type = event.header.type;
   switch (type)
   {
     case CLAP_EVENT_NOTE_ON:
     {
-      auto portid = event.note.port_index;
-      for (auto &i : _midi_outports)
+      if (auto *out = midiOutForPortIndex(event.note.port_index))
       {
-        if (i->_info.id == portid)
-        {
-          i->addNoteOn(event.note.channel, event.note.key, event.note.velocity * 127.f);
-          break;
-        }
+        out->addNoteOn(event.note.header.time, event.note.channel, event.note.key,
+                       event.note.velocity * 127.f);
       }
     }
     break;
     case CLAP_EVENT_NOTE_OFF:
     {
-      auto portid = event.note.port_index;
-      for (auto &i : _midi_outports)
+      if (auto *out = midiOutForPortIndex(event.note.port_index))
       {
-        if (i->_info.id == portid)
-        {
-          i->addNoteOff(event.note.channel, event.note.key, event.note.velocity * 127.f);
-          break;
-        }
+        out->addNoteOff(event.note.header.time, event.note.channel, event.note.key,
+                        event.note.velocity * 127.f);
       }
     }
     break;
     case CLAP_EVENT_MIDI:
     {
-      auto portid = event.midi.port_index;
-      for (auto &i : _midi_outports)
+      if (auto *out = midiOutForPortIndex(event.midi.port_index))
       {
-        if (i->_info.id == portid)
-        {
-          i->addMIDI3Byte(event.midi.data);
-          break;
-        }
+        out->addMIDI3Byte(event.midi.header.time, event.midi.data);
       }
     }
     break;

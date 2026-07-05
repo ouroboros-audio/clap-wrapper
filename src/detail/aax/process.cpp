@@ -43,6 +43,21 @@ inline double midiDataByteToNormalized(uint8_t value)
   return static_cast<double>(value) / 127.0;
 }
 
+inline uint8_t normalizedToMidiDataByte(double value)
+{
+  return static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(value * 127.0)), 0, 127));
+}
+
+inline uint8_t clampMidiDataByte(int32_t value)
+{
+  return static_cast<uint8_t>(std::clamp(value, int32_t{0}, int32_t{127}));
+}
+
+inline uint8_t clampMidiChannel(int32_t channel)
+{
+  return static_cast<uint8_t>(std::clamp(channel, int32_t{0}, int32_t{15}));
+}
+
 AAXProcessAdapter::~AAXProcessAdapter()
 {
   delete[] _silent_input;
@@ -65,7 +80,8 @@ void AAXProcessAdapter::setupProcessing(const clap_plugin_t *plugin, double samp
                                         const clap_plugin_audio_ports *ext_audio,
                                         Clap::IAutomation *automation,
                                         std::vector<clap_id> &gesturedparameters,
-                                        ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI)
+                                        ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI,
+                                        bool hasMidiOutputNode)
 {
   _plugin = plugin;
   _ext_param = ext_param;
@@ -75,6 +91,7 @@ void AAXProcessAdapter::setupProcessing(const clap_plugin_t *plugin, double samp
 
   _midi_first_portid = midiportid;
   _midi_prefer_mididialect = preferMIDI;
+  _has_midi_output_node = hasMidiOutputNode;
 
   // other needed references like buffers, MIDINodes etc. are passed
   // via the SAAX_Wrapper_AlgorithmicContext to the process function
@@ -331,7 +348,9 @@ void AAXProcessAdapter::process(SAAX_Wrapper_AlgorithmicContext *context)
   // sort all indices
   sortEventIndices();
 
+  _current_context = context;
   auto status = _plugin->process(_plugin, &_proc);
+  _current_context = nullptr;
   switch (status)
   {
     case CLAP_PROCESS_ERROR:
@@ -358,12 +377,6 @@ void AAXProcessAdapter::process(SAAX_Wrapper_AlgorithmicContext *context)
       break;
   }
 
-  // no support for outgoing MIDI at this time
-  //if (context->mOutputNode)
-  //{
-  //  auto midiOutputStream = context->mOutputNode->GetNodeBuffer();
-  //  // do MIDI out
-  //}
 }
 
 void AAXProcessAdapter::flush()
@@ -403,43 +416,18 @@ bool AAXProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
   {
     case CLAP_EVENT_NOTE_ON:
     {
-      // auto nevt = reinterpret_cast<const clap_event_note*>(event);
-
-      /*
-      Steinberg::Vst::Event oe{};
-      oe.type = Steinberg::Vst::Event::kNoteOnEvent;
-      oe.noteOn.channel = nevt->channel;
-      oe.noteOn.pitch = nevt->key;
-      oe.noteOn.velocity = nevt->velocity;
-      oe.noteOn.length = 0;
-      oe.noteOn.tuning = 0.0f;
-      oe.noteOn.noteId = nevt->note_id;
-      oe.busIndex = 0;  // FIXME - multi-out midi still needs work
-      oe.sampleOffset = nevt->header.time;
-
-      if (_vstdata && _vstdata->outputEvents) _vstdata->outputEvents->addEvent(oe);
-      */
+      auto nevt = reinterpret_cast<const clap_event_note *>(event);
+      return postMidiPacket(nevt->header.time, static_cast<uint8_t>(0x90u | clampMidiChannel(nevt->channel)),
+                            clampMidiDataByte(nevt->key),
+                            normalizedToMidiDataByte(nevt->velocity), 3);
     }
-      return true;
     case CLAP_EVENT_NOTE_OFF:
     {
-      // auto nevt = reinterpret_cast<const clap_event_note*>(event);
-      /*
-      Steinberg::Vst::Event oe{};
-      oe.type = Steinberg::Vst::Event::kNoteOffEvent;
-      oe.noteOff.channel = nevt->channel;
-      oe.noteOff.pitch = nevt->key;
-      oe.noteOff.velocity = nevt->velocity;
-      oe.noteOn.length = 0;
-      oe.noteOff.tuning = 0.0f;
-      oe.noteOff.noteId = nevt->note_id;
-      oe.busIndex = 0;  // FIXME - multi-out midi still needs work
-      oe.sampleOffset = nevt->header.time;
-
-      if (_vstdata && _vstdata->outputEvents) _vstdata->outputEvents->addEvent(oe);
-      */
+      auto nevt = reinterpret_cast<const clap_event_note *>(event);
+      return postMidiPacket(nevt->header.time, static_cast<uint8_t>(0x80u | clampMidiChannel(nevt->channel)),
+                            clampMidiDataByte(nevt->key),
+                            normalizedToMidiDataByte(nevt->velocity), 3);
     }
-      return true;
     case CLAP_EVENT_NOTE_END:
     case CLAP_EVENT_NOTE_CHOKE:
       removeFromActiveNotes((const clap_event_note *)(event));
@@ -476,14 +464,57 @@ bool AAXProcessAdapter::enqueueOutputEvent(const clap_event_header_t *event)
       break;
 
     case CLAP_EVENT_MIDI:
+    {
+      auto mevt = reinterpret_cast<const clap_event_midi *>(event);
+      const auto status = static_cast<uint8_t>(mevt->data[0]);
+      const auto kind = static_cast<uint8_t>(status & 0xF0u);
+      switch (kind)
+      {
+        case 0x80:
+        case 0x90:
+        case 0xA0:
+        case 0xB0:
+        case 0xE0:
+          return postMidiPacket(mevt->header.time, status, mevt->data[1], mevt->data[2], 3);
+        case 0xC0:
+        case 0xD0:
+          return postMidiPacket(mevt->header.time, status, mevt->data[1], 0, 2);
+        default:
+          return false;
+      }
+    }
     case CLAP_EVENT_MIDI_SYSEX:
     case CLAP_EVENT_MIDI2:
-      return true;
+      return false;
       break;
     default:
       break;
   }
   return false;
+}
+
+bool AAXProcessAdapter::postMidiPacket(uint32_t timestamp, uint8_t status, uint8_t data1,
+                                       uint8_t data2, uint32_t length)
+{
+  if (!_has_midi_output_node || !_current_context || !_current_context->mOutputNode || length < 1 ||
+      length > 3)
+  {
+    return false;
+  }
+
+  AAX_CMidiPacket packet{};
+  packet.mIsImmediate = false;
+  packet.mTimestamp = timestamp;
+  if (_proc.frames_count > 0)
+  {
+    packet.mTimestamp = std::min(packet.mTimestamp, static_cast<uint32_t>(_proc.frames_count - 1));
+  }
+  packet.mLength = length;
+  packet.mData[0] = status;
+  packet.mData[1] = data1;
+  packet.mData[2] = data2;
+
+  return _current_context->mOutputNode->PostMIDIPacket(&packet) == AAX_SUCCESS;
 }
 
 void AAXProcessAdapter::addToActiveNotes(const clap_event_note *note)

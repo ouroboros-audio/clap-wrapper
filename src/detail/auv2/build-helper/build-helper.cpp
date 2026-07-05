@@ -3,6 +3,7 @@
 #include <vector>
 #include <functional>
 #include <sstream>
+#include <algorithm>
 
 #include "detail/clap/fsutil.h"
 #include "detail/os/fs.h"
@@ -98,6 +99,65 @@ struct auInfo
   }
 };
 
+const void *CLAP_ABI buildHelperHostGetExtension(const clap_host_t *, const char *)
+{
+  return nullptr;
+}
+
+void CLAP_ABI buildHelperHostRequestRestart(const clap_host_t *)
+{
+}
+
+void CLAP_ABI buildHelperHostRequestProcess(const clap_host_t *)
+{
+}
+
+void CLAP_ABI buildHelperHostRequestCallback(const clap_host_t *)
+{
+}
+
+bool hasTag(const auInfo &unit, const std::string &tag)
+{
+  return std::find(unit.tags.begin(), unit.tags.end(), tag) != unit.tags.end();
+}
+
+bool clapPluginHasNoteOutputs(const Clap::Library &loader, const char *pluginId)
+{
+  if (loader._pluginFactory == nullptr || pluginId == nullptr)
+  {
+    return false;
+  }
+
+  const clap_host_t host = {
+      CLAP_VERSION,
+      nullptr,
+      "clap-wrapper AUv2 build helper",
+      "CLAP Wrapper",
+      "https://github.com/free-audio/clap-wrapper",
+      CLAP_WRAPPER_VERSION,
+      buildHelperHostGetExtension,
+      buildHelperHostRequestRestart,
+      buildHelperHostRequestProcess,
+      buildHelperHostRequestCallback};
+
+  const auto *plugin = loader._pluginFactory->create_plugin(loader._pluginFactory, &host, pluginId);
+  if (plugin == nullptr)
+  {
+    return false;
+  }
+
+  bool result = false;
+  if (plugin->init(plugin))
+  {
+    const auto *notePorts = static_cast<const clap_plugin_note_ports_t *>(
+        plugin->get_extension(plugin, CLAP_EXT_NOTE_PORTS));
+    result = notePorts != nullptr && notePorts->count(plugin, false) > 0;
+  }
+
+  plugin->destroy(plugin);
+  return result;
+}
+
 bool buildUnitsFromClap(const std::string &clapfile, const std::string &clapname, std::string manu,
                         std::string manuName, std::string itype, std::string subt,
                         std::vector<auInfo> &units)
@@ -184,6 +244,10 @@ bool buildUnitsFromClap(const std::string &clapfile, const std::string &clapname
     {
       u.tags.push_back(*fp);
       ++fp;
+    }
+    if (clapPluginHasNoteOutputs(loader, clapPlug->id) && !hasTag(u, "MIDI"))
+    {
+      u.tags.push_back("MIDI");
     }
 
     if (loader._pluginFactoryAUv2Info)
@@ -388,7 +452,7 @@ int main(int argc, char **argv)
         {
           cppf << "AUV2_Type::aumi_noteeffect";
         }
-        else if (u.type == "aufx")
+        else if (u.type == "aufx" || u.type == "aumf")
         {
           cppf << "AUV2_Type::aufx_effect";
         }

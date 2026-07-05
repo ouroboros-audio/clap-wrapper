@@ -82,7 +82,8 @@ class AAXProcessAdapter
   void setupProcessing(const clap_plugin_t *plugin, double samplerate,
                        const clap_plugin_params_t *ext_param, const clap_plugin_audio_ports *ext_audio,
                        Clap::IAutomation *automation, std::vector<clap_id> &gesturedParameters,
-                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI);
+                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI,
+                       bool hasMidiOutputNode);
   void process(SAAX_Wrapper_AlgorithmicContext *context);
   void flush();
 
@@ -121,6 +122,7 @@ class AAXProcessAdapter
   float *_silent_output = nullptr;
 
   ParamChangeQueue *_inqueue;
+  SAAX_Wrapper_AlgorithmicContext *_current_context = nullptr;
 
   void sortEventIndices();
 
@@ -128,6 +130,8 @@ class AAXProcessAdapter
                                      const clap_event_header_t *event);
 
   bool enqueueOutputEvent(const clap_event_header_t *event);
+  bool postMidiPacket(uint32_t timestamp, uint8_t status, uint8_t data1, uint8_t data2,
+                      uint32_t length);
   void addToActiveNotes(const clap_event_note *note);
   void removeFromActiveNotes(const clap_event_note *note);
 
@@ -139,6 +143,7 @@ class AAXProcessAdapter
   // MIDI
   uint32_t _midi_first_portid = 0;
   bool _midi_prefer_mididialect = true;
+  bool _has_midi_output_node = false;
 };
 
 AAX_Result GetEffectDescriptions(AAX_ICollection *outDescriptions);
@@ -277,6 +282,10 @@ class ClapAsAAX : public AAX_CEffectParameters,
 
   uint32_t _midi_first_portid = 0;
   bool _midi_prefer_mididialect = true;
+  bool _has_midi_output_node = false;
+
+  bool _aax_info_controls_midi_nodes = false;
+  bool _aax_info_has_midi_output_node = false;
 
   ParamChangeQueue _paramsToProcess;
 

@@ -31,6 +31,7 @@
 #include "../clap/automation.h"
 #include "parameter.h"
 #include <map>
+#include <mutex>
 
 namespace Clap::AUv2
 {
@@ -156,6 +157,7 @@ class ProcessAdapter
 
   std::vector<clap_multi_event_t> _events;
   std::vector<size_t> _eventindices;
+  std::mutex _eventMutex;
 
   std::vector<clap_multi_event_t> _outevents;
 

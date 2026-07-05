@@ -172,6 +172,7 @@ void ProcessAdapter::sortEventIndices()
 
 void ProcessAdapter::process(ProcessData &data)
 {
+  std::lock_guard<std::mutex> eventLock(_eventMutex);
   sortEventIndices();
   _processData.frames_count = data.numSamples;
   _transport.flags = 0;
@@ -458,6 +459,7 @@ void ProcessAdapter::processOutputEvents()
 void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData2,
                                   UInt32 inOffsetSampleFrame)
 {
+  std::lock_guard<std::mutex> eventLock(_eventMutex);
   const UInt32 strippedStatus = (inStatus & 0xf0U) >> 4;  // NOLINT
   const UInt32 channel = inStatus & 0x0fU;                // NOLINT
 
@@ -465,7 +467,7 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
 
   bool live = (inOffsetSampleFrame & kMusicDeviceSampleFrameMask_IsScheduled) != 0;
 
-  clap_multi_event n;
+  clap_multi_event n{};
   n.header.time = deltaFrames;
   // type is being set further down
   n.header.flags = 0 + (live ? CLAP_EVENT_IS_LIVE : 0);
@@ -510,8 +512,10 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
       }
       this->_eventindices.emplace_back((this->_events.size()));
       this->_events.emplace_back(n);
-      removeFromActiveNotes(&n.note);
-      this->output_events_try_push(&this->_out_events, &n.header);
+      if (n.header.type == CLAP_EVENT_NOTE_OFF)
+      {
+        removeFromActiveNotes(&n.note);
+      }
       break;
     case 9:  // note on
 
@@ -539,9 +543,10 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
 
       this->_eventindices.emplace_back((this->_events.size()));
       this->_events.emplace_back(n);
-      addToActiveNotes(&n.note);
-
-      this->output_events_try_push(&this->_out_events, &n.header);
+      if (n.header.type == CLAP_EVENT_NOTE_ON)
+      {
+        addToActiveNotes(&n.note);
+      }
 
       break;
     case 0xA:  // any other MIDI message with 1 or 2 data bytes
@@ -568,7 +573,8 @@ void ProcessAdapter::addMIDIEvent(UInt32 inStatus, UInt32 inData1, UInt32 inData
 void ProcessAdapter::addParameterEvent(const clap_param_info_t &info, double value,
                                        uint32_t inOffsetSampleFrame)
 {
-  clap_multi_event n;
+  std::lock_guard<std::mutex> eventLock(_eventMutex);
+  clap_multi_event n{};
   n.header.size = sizeof(n.param);
   n.header.type = CLAP_EVENT_PARAM_VALUE;
   n.header.space_id = 0;
