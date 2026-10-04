@@ -56,3 +56,14 @@ make_clapfirst_plugins(
         # standalone "${PRODUCT_NAME}" "org.free-audio.clap-first-bad-distortion"
 )
 
+
+if (TARGET ${PROJECT_NAME}_vst3-clap-wrapper-vst3-lib)
+    add_executable(clap-vst3-host-notifications ../vst3-host-notifications.cpp)
+    target_compile_features(clap-vst3-host-notifications PRIVATE cxx_std_20)
+    target_include_directories(clap-vst3-host-notifications PRIVATE
+        ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(clap-vst3-host-notifications PRIVATE
+        ${PROJECT_NAME}_vst3-clap-wrapper-vst3-lib clap-wrapper-compile-options)
+    add_test(NAME clap-vst3-host-notifications COMMAND clap-vst3-host-notifications)
+endif()

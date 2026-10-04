@@ -14,7 +14,9 @@
 #include "osutil.h"
 #include <tchar.h>
 #include <filesystem>
+#include <memory>
 #include <vector>
+#include <algorithm>
 #include "fs.h"
 
 #include <fmt/xchar.h>
@@ -48,7 +50,11 @@ class WindowsHelper
   static LRESULT Wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   HWND _msgWin = 0;
   UINT_PTR _timer = 0;
-  std::vector<IPlugObject *> _plugs;
+  struct Registration
+  {
+    IPlugObject *plugin;
+  };
+  std::vector<std::shared_ptr<Registration>> _plugs;
 } gWindowsHelper;
 
 void init()
@@ -148,20 +154,26 @@ void WindowsHelper::terminate()
 
 void WindowsHelper::executeDefered()
 {
-  for (auto &&p : _plugs)
+  // Host callbacks may detach, replace or activate instances during this tick.
+  const auto registrations = _plugs;
+  for (const auto &registration : registrations)
   {
-    if (p) p->onIdle();
+    if (auto *plugin = registration->plugin) plugin->onIdle();
   }
 }
 
 void WindowsHelper::attach(IPlugObject *plugobject)
 {
-  _plugs.push_back(plugobject);
+  _plugs.push_back(std::make_shared<Registration>(Registration{plugobject}));
 }
 
 void WindowsHelper::detach(IPlugObject *plugobject)
 {
-  _plugs.erase(std::remove(_plugs.begin(), _plugs.end(), plugobject), _plugs.end());
+  for (const auto &registration : _plugs)
+    if (registration->plugin == plugobject) registration->plugin = nullptr;
+  _plugs.erase(std::remove_if(_plugs.begin(), _plugs.end(), [](const auto &registration) {
+    return registration->plugin == nullptr;
+  }), _plugs.end());
 }
 
 // [UI Thread]

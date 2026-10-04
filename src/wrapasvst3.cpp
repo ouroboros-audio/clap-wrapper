@@ -180,6 +180,18 @@ tresult PLUGIN_API ClapAsVst3::terminate()
 
 tresult PLUGIN_API ClapAsVst3::setActive(TBool state)
 {
+  struct ActivationScope
+  {
+    ClapAsVst3 &owner;
+    bool previous;
+    ~ActivationScope()
+    {
+      owner._settingActive = previous;
+      if (!previous && owner._pendingComponentRestart.load(std::memory_order_acquire) != 0)
+        owner._os_attached.on();
+    }
+  } scope{*this, _settingActive};
+  _settingActive = true;
   if (state)
   {
     if (_active) return kResultFalse;
@@ -1183,7 +1195,18 @@ void ClapAsVst3::param_rescan(clap_param_rescan_flags flags)
     }
   }
 
-  this->componentHandler->restartComponent(vstflags);
+  notifyComponentRestart(vstflags);
+}
+
+void ClapAsVst3::notifyComponentRestart(int32 flags)
+{
+  if (!componentHandler) return;
+  // Hosts may hold their processing lock throughout setActive(). A synchronous
+  // restart can re-enter that lock, so deliver these notifications on idle.
+  if (_settingActive)
+    _pendingComponentRestart.fetch_or(flags, std::memory_order_release);
+  else
+    componentHandler->restartComponent(flags);
 }
 
 void ClapAsVst3::param_clear(clap_id param, clap_param_clear_flags flags)
@@ -1240,14 +1263,14 @@ bool ClapAsVst3::gui_request_hide()
 
 void ClapAsVst3::latency_changed()
 {
-  if (this->componentHandler)
-    this->componentHandler->restartComponent(Vst::RestartFlags::kLatencyChanged);
+  notifyComponentRestart(Vst::RestartFlags::kLatencyChanged);
 }
 
 void ClapAsVst3::tail_changed()
 {
   // TODO: this could also be kIoChanged, we have to check this
-  this->componentHandler->restartComponent(Vst::RestartFlags::kLatencyChanged);
+  // CLAP delivers tail changes on the audio thread; the VST3 handler belongs to the UI thread.
+  _pendingComponentRestart.fetch_or(Vst::RestartFlags::kLatencyChanged, std::memory_order_release);
 }
 
 void ClapAsVst3::mark_dirty()
@@ -1369,6 +1392,11 @@ const char *ClapAsVst3::host_get_name()
 
 void ClapAsVst3::onIdle()
 {
+  if (_settingActive) return;
+  if (const auto flags = _pendingComponentRestart.exchange(0, std::memory_order_acq_rel); flags != 0)
+  {
+    notifyComponentRestart(flags);
+  }
   // handling queued events
   queueEvent n;
   while (_queueToUI.pop(n))
@@ -1381,6 +1409,8 @@ void ClapAsVst3::onIdle()
       case queueEvent::type_t::editvalue:
       {
         auto param = (Vst3Parameter *)(parameters.getParameter(n._data._value.param_id & 0x7FFFFFFF));
+        // A synchronous restart can replace the schema before queued edits drain.
+        if (param == nullptr) break;
         auto v = n._data._value.value;
         performEdit(param->getInfo().id, param->asVst3Value(v));
       }

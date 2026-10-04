@@ -379,6 +379,7 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
   void addAudioBusFrom(const clap_audio_port_info_t *info, bool is_input);
   void addMIDIBusFrom(const clap_note_port_info_t *info, uint32_t index, bool is_input);
   void updateAudioBusses();
+  void notifyComponentRestart(int32 flags);
 
   Vst::UnitID getOrCreateUnitInfo(const char *modulename);
   std::map<std::string, Vst::UnitID> _moduleToUnit;
@@ -397,6 +398,8 @@ class ClapAsVst3 : public Steinberg::Vst::SingleComponentEffect,
 
   // plugin state
   bool _active = false;
+  bool _settingActive = false;
+  std::atomic<int32> _pendingComponentRestart{0};
   os::State _os_attached;
   bool _processing = false;
 
