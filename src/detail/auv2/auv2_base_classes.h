@@ -1,4 +1,5 @@
 #pragma once
+#include "../shared/processgate.h"
 
 /*
  Copyright (c) 2023 Timo Kaluza (defiantnerd)
@@ -481,9 +482,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
   void mark_dirty() override
   {
   }
-  void restartPlugin() override
-  {
-  }
+  void restartPlugin() override { _restartRequested.store(true); }
+  OSStatus setOfflineRendering(bool offline, bool restart = false);
   void request_callback() override
   {
     _requestUICallback = true;
@@ -659,6 +659,9 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   std::unique_ptr<Clap::AUv2::ProcessAdapter> _processAdapter;
   std::atomic<bool> _initialized = false;
+  std::atomic<bool> _restartRequested{false};
+  bool _offlineRendering = false;
+  Clap::ProcessGate _processGate;
 
   // some info about the wrapped clap
   uint32_t _midi_preferred_dialect = 0;

@@ -21,6 +21,13 @@ void AAX_CALLBACK AAXWrapper_AlgorithmProcessProc(
 
 void ClapAsAAX::process(SAAX_Wrapper_AlgorithmicContext *context)
 {
+  Clap::ProcessGate::Reader processing(_processGate);
+  if (!processing || !_activated.load())
+  {
+    for (int32_t channel = 0; channel < _outputChannelCount; ++channel)
+      std::fill_n(context->mAudioOutputs[channel], *context->mNumSamples, 0.0f);
+    return;
+  }
   // abort any flush request
   _flushRequested.store(false);
 

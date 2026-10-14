@@ -188,6 +188,7 @@ WrapAsAUV2::~WrapAsAUV2()
 // this is where AUv2 transitions to render-ready
 OSStatus WrapAsAUV2::Initialize()
 {
+  Clap::ProcessGate::Suspension suspended(_processGate);
   if (!_desc) return 2;
 
   // first need to initialize the base to create
@@ -200,6 +201,7 @@ OSStatus WrapAsAUV2::Initialize()
   // main thread
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   activateCLAP();
+  if (!_initialized) { Base::Cleanup(); return kAudioUnitErr_FailedInitialization; }
 
 #if 0
   // get our current numChannels for input and output
@@ -605,6 +607,7 @@ OSStatus WrapAsAUV2::Stop()
 }
 void WrapAsAUV2::Cleanup()
 {
+  Clap::ProcessGate::Suspension suspended(_processGate);
   LOGINFO("[clap-wrapper] Cleaning up Plugin");
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   if (this->_uiIsOpened)
@@ -658,6 +661,10 @@ OSStatus WrapAsAUV2::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope in
   {
     switch (inID)
     {
+      case kAudioUnitProperty_OfflineRender:
+        outWritable = true;
+        outDataSize = sizeof(UInt32);
+        return noErr;
       case kAudioUnitProperty_ParameterStringFromValue:
         if (inScope == kAudioUnitScope_Global)
         {
@@ -742,6 +749,9 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
   {
     switch (inID)
     {
+      case kAudioUnitProperty_OfflineRender:
+        *static_cast<UInt32 *>(outData) = _offlineRendering ? 1u : 0u;
+        return noErr;
       case kAudioUnitProperty_ParameterStringFromValue:
       {
         //         _plugin->_ext._params->value_to_text(
@@ -874,6 +884,10 @@ OSStatus WrapAsAUV2::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
   {
     switch (inID)
     {
+      case kAudioUnitProperty_OfflineRender:
+        if (!inData || inDataSize != sizeof(UInt32) || inElement != 0)
+          return kAudioUnitErr_InvalidPropertyValue;
+        return setOfflineRendering(*static_cast<const UInt32 *>(inData) != 0);
       case kAudioUnitProperty_BypassEffect:
       {
         if (inDataSize < sizeof(UInt32))
@@ -1044,7 +1058,7 @@ void WrapAsAUV2::activateCLAP()
     _processAdapter->setupProcessing(Inputs(), Outputs(), _plugin->_plugin, _plugin->_ext._params, this,
                                      &_parametertree, this, maxSampleFrames, _midi_preferred_dialect);
 
-    _plugin->activate();
+    if (!_plugin->setRenderMode(_offlineRendering) || !_plugin->activate()) return;
     _plugin->start_processing();
     _initialized = true;
   }
@@ -1064,9 +1078,43 @@ void WrapAsAUV2::deactivateCLAP()
   // and the destructor are responsible for explicit release.
 }
 
+OSStatus WrapAsAUV2::setOfflineRendering(bool offline, bool restart)
+{
+  if (!restart && offline == _offlineRendering) return noErr;
+  Clap::ProcessGate::Suspension suspended(_processGate);
+  auto mainThread = _plugin->AlwaysMainThread();
+  const bool wasActive = _initialized.load();
+  const bool previous = _offlineRendering;
+  if (wasActive) deactivateCLAP();
+  if (!_plugin->setRenderMode(offline))
+  {
+    _plugin->setRenderMode(previous);
+    if (wasActive) activateCLAP();
+    return kAudioUnitErr_CannotDoInCurrentContext;
+  }
+  _offlineRendering = offline;
+  _restartRequested.store(false);
+  if (wasActive) activateCLAP();
+  latency_changed();
+  if (wasActive && !_initialized) return kAudioUnitErr_FailedInitialization;
+  return noErr;
+}
+
 OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTimeStamp &inTimeStamp,
                             UInt32 inFrames)
 {
+  Clap::ProcessGate::Reader processing(_processGate);
+  if (!processing)
+  {
+    for (UInt32 bus = 0; bus < Outputs().GetNumberOfElements(); ++bus)
+    {
+      auto &buffers = Output(bus).GetBufferList();
+      for (UInt32 channel = 0; channel < buffers.mNumberBuffers; ++channel)
+        if (buffers.mBuffers[channel].mData) std::memset(buffers.mBuffers[channel].mData, 0, buffers.mBuffers[channel].mDataByteSize);
+    }
+    inFlags |= kAudioUnitRenderAction_OutputIsSilence;
+    return noErr;
+  }
   assert(inFlags == 0);
   if (_initialized && (inFlags == 0))
   {
@@ -1200,6 +1248,7 @@ void WrapAsAUV2::onEndEdit(clap_id id)
 void WrapAsAUV2::onIdle()
 {
   if (!_plugin) return;
+  if (_restartRequested.exchange(false)) setOfflineRendering(_offlineRendering, true);
   // run queue stuff
   queueEvent e;
   while (this->_queueToUI.pop(e))

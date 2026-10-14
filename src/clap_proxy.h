@@ -182,6 +182,10 @@ class Plugin
 
   bool load(const clap_istream_t *stream) const;
   bool save(const clap_ostream_t *stream) const;
+  bool setRenderMode(bool offline) const
+  {
+    return !_ext._render || _ext._render->set(_plugin, offline ? CLAP_RENDER_OFFLINE : CLAP_RENDER_REALTIME);
+  }
   bool activate() const;
   void deactivate() const;
   bool start_processing();

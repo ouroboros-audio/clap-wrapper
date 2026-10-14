@@ -914,8 +914,10 @@ AAX_Result ClapAsAAX::NotificationReceived(AAX_CTypeID inNotificationType,
     case AAX_eNotificationEvent_SessionBeingOpened:
       break;
     case AAX_eNotificationEvent_EnteringOfflineMode:
+      if (!setOfflineRendering(true)) return AAX_ERROR_INVALID_ARGUMENT;
       break;
     case AAX_eNotificationEvent_ExitingOfflineMode:
+      if (!setOfflineRendering(false)) return AAX_ERROR_INVALID_ARGUMENT;
       break;
     case AAX_eNotificationEvent_SessionPathChanged:
       break;
@@ -1150,6 +1152,26 @@ void ClapAsAAX::mark_dirty()
 
 void ClapAsAAX::restartPlugin()
 {
+  _restartRequested.store(true);
+}
+
+bool ClapAsAAX::setOfflineRendering(bool offline, bool restart)
+{
+  if (!restart && offline == _offlineRendering) return true;
+  Clap::ProcessGate::Suspension suspended(_processGate);
+  if (!_plugin) { _offlineRendering = offline; return true; }
+  auto mainThread = _plugin->AlwaysMainThread();
+  const bool wasActive = _activated.load(), wasProcessing = _processing.load();
+  const bool previous = _offlineRendering;
+  stopProcessing();
+  deactivatePlugin();
+  const bool accepted = _plugin->setRenderMode(offline);
+  _offlineRendering = accepted ? offline : previous;
+  if (!accepted) _plugin->setRenderMode(previous);
+  _restartRequested.store(false);
+  if (wasActive) activatePlugin();
+  if (wasProcessing && _activated) startProcessing();
+  return accepted && (!wasActive || _activated);
 }
 
 bool ClapAsAAX::register_timer(uint32_t period_ms, clap_id *timer_id)
@@ -1245,6 +1267,9 @@ void ClapAsAAX::request_callback()
 
 void ClapAsAAX::onIdle()
 {
+  if (_restartRequested.exchange(false)) setOfflineRendering(_offlineRendering, true);
+  Clap::ProcessGate::Reader processing(_processGate);
+  if (!processing) return;
   if (_flushRequested.exchange(false))
   {
     auto fo = _plugin->AlwaysMainThread();
@@ -1272,8 +1297,11 @@ void ClapAsAAX::activatePlugin()
                                      _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect,
                                      _has_midi_output_node);
 
+    if (!_plugin->setRenderMode(_offlineRendering) || !_plugin->activate()) return;
+    AAX_EStemFormat outputStem;
+    if (_aax_ctrl->GetOutputStemFormat(&outputStem) == AAX_SUCCESS)
+      _outputChannelCount = AAX_STEM_FORMAT_CHANNEL_COUNT(outputStem);
     _activated = true;
-    _plugin->activate();
 
     // pass latency when activated
     auto scope = _plugin->AlwaysMainThread();

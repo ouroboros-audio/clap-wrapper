@@ -48,6 +48,7 @@
 #include <map>
 #include <string>
 #include <mutex>
+#include "../shared/processgate.h"
 #include <vector>
 
 #include "../clap/automation.h"
@@ -215,6 +216,7 @@ class ClapAsAAX : public AAX_CEffectParameters,
   void mark_dirty() override;
 
   void restartPlugin() override;
+  bool setOfflineRendering(bool offline, bool restart = false);
 
   void request_callback() override;
 
@@ -262,6 +264,10 @@ class ClapAsAAX : public AAX_CEffectParameters,
 
   mutable Clap::StateMemento _state;
 
+  Clap::ProcessGate _processGate;
+  std::atomic<bool> _restartRequested{false};
+  bool _offlineRendering = false;
+  std::atomic<int32_t> _outputChannelCount{0};
   std::atomic<bool> _activated{false};
   std::atomic<bool> _processing{false};
   std::atomic<bool> _wants_on_main_thread = false;
